@@ -1,7 +1,11 @@
-<script setup>
-import HelloWorld from './components/HelloWorld.vue'
-</script>
-
 <template>
-  <HelloWorld />
+  <div class="app-layout" :data-theme="theme">
+    <AppSidebar />
+    <div class="main-area">
+      <AppHeader />
+      <main class="page-content">
+        <RouterView />
+      </main>
+    </div>
+  </div>
 </template>
