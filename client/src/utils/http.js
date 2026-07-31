@@ -28,12 +28,12 @@ http.interceptors.response.use(
 /**
  * 使用浏览器原生 fetch + ReadableStream 实现 SSE 流式请求
  *
- * @param {string} url - 请求地址
- * @param {object} body - 请求体
+ * @param {string} url     - 请求地址
+ * @param {object} body    - 请求体
  * @param {object} options - 回调函数
  * @param {function} options.onToken - 收到 token 时调用
  * @param {function} options.onEvent - 收到其他事件时调用
- * @param {function} options.onDone - 流结束时的回调
+ * @param {function} options.onDone  - 流结束时的回调
  * @param {function} options.onError - 错误时的回调
  */
 export async function fetchStream(
@@ -100,7 +100,7 @@ export async function fetchStream(
         }
       }
     }
-  } catch (error) {
+  } catch (err) {
     onError?.(err);
   }
 }

@@ -1,28 +1,69 @@
+/**
+ * @description ERP 路由：智能填单（自然语言→结构化）+ 审批流（Multi-Agent）
+ */
+
 import express from "express";
-import { parseExpense } from "../services/erp/parser.js";
-import { runApproval } from "../services/erp/approval.js";
+import {
+  parseExpenseForm,
+  parseLeaveForm,
+  checkCompliance,
+} from "../services/erp/parser.js";
+import { runApprovalFlow, APPROVAL_ROLES } from "../services/erp/approval.js";
+import { rateLimiter } from "../middleware/index.js";
+import { sendSseError } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
 
-const router = express.Router();
+export const erpRouter = express.Router();
 
-// POST /api/erp/parse - 解析自然语言输入
-router.post("/parse", async (req, res) => {
+// 申请记录（生产换数据库）
+const applications = new Map();
+
+// ── POST /api/erp/parse ────────────────────────────────────────
+// 自然语言 → 结构化表单（非流式，快速返回）
+erpRouter.post("/parse", rateLimiter, async (req, res) => {
+  const { text, formType } = req.body;
+
+  if (!text?.trim()) {
+    return res.status(400).json({ error: { message: "描述不能为空" } });
+  }
+
+  if (!["expense", "leave"].includes(formType)) {
+    return res
+      .status(400)
+      .json({ error: { message: "formType 必须是 expense 或 leave" } });
+  }
+
   try {
-    const { text } = req.body;
-    if (!text) return res.status(400).json({ error: "请输入描述" });
+    let form;
+    if (formType === "expense") {
+      form = await parseExpenseForm(text);
+      // 额外的合规检查
+      const complianceAlerts = checkCompliance(form);
+      form.warnings = [...(form.warnings || []), ...complianceAlerts];
+    } else {
+      form = await parseLeaveForm(text);
+    }
 
-    const parsed = await parseExpense(text);
-    res.json(parsed);
+    res.json({ success: true, form, formType });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    logger.error("erp: parse error", { error: err.message });
+    res.status(500).json({ error: { message: "解析失败，请检查输入内容" } });
   }
 });
 
-// POST /api/erp/submit - 提交表单并执行审批
-router.post("/submit", async (req, res) => {
-  // SSE 流式输出审批进度
+// ── POST /api/erp/submit/stream ────────────────────────────────
+// 提交申请，启动 Multi-Agent 审批流（SSE 流式推送审批对话）
+erpRouter.post("/submit/stream", rateLimiter, async (req, res) => {
+  const { formData, formType, applicantName } = req.body;
+
+  if (!formData || !formType) {
+    return res.status(400).json({ error: { message: "缺少表单数据" } });
+  }
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
 
   const send = (event, data) => {
     if (!res.writableEnded) {
@@ -30,23 +71,74 @@ router.post("/submit", async (req, res) => {
     }
   };
 
+  // 生成申请编号
+  const appId = `APP${Date.now()}`;
+  const application = {
+    id: appId,
+    formType,
+    formData: { ...formData, applicantName: applicantName || "申请人" },
+    status: "pending",
+    messages: [],
+    createdAt: new Date().toISOString(),
+  };
+  applications.set(appId, application);
+
+  send("start", { appId, formType });
+
   try {
-    const formData = req.body;
-    if (!formData.type)
-      return res.status(400).json({ error: "表单数据不完整" });
+    const result = await runApprovalFlow(
+      application.formData,
+      formType,
+      (type, data) => {
+        // 把 Agent 的每条消息记录到申请里
+        if (type === "message") {
+          application.messages.push(data);
+        }
+        send(type, data);
+      },
+    );
 
-    send("start", {});
+    // 更新申请状态
+    application.status = result.status;
+    application.result = result;
+    application.updatedAt = new Date().toISOString();
 
-    const result = await runApproval(formData, (progress) => {
-      send("progress", progress);
-    });
-
-    send("done", result);
+    send("done", { appId });
   } catch (err) {
-    send("error", { message: err.message });
+    logger.error("erp: approval error", { error: err.message, appId });
+    sendSseError(res, err);
   } finally {
     if (!res.writableEnded) res.end();
   }
 });
 
-export default router;
+// ── GET /api/erp/applications ──────────────────────────────────
+// 获取所有申请记录（我的申请列表）
+erpRouter.get("/applications", (req, res) => {
+  const list = [...applications.values()]
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .map((app) => ({
+      id: app.id,
+      formType: app.formType,
+      status: app.status,
+      amount: app.formData.totalAmount,
+      reason: app.formData.reason,
+      days: app.formData.workdays,
+      createdAt: app.createdAt,
+    }));
+  res.json({ applications: list });
+});
+
+// ── GET /api/erp/applications/:id ─────────────────────────────
+// 获取某条申请的详细记录（含完整审批对话）
+erpRouter.get("/applications/:id", (req, res) => {
+  const app = applications.get(req.params.id);
+  if (!app) return res.status(404).json({ error: { message: "申请不存在" } });
+  res.json(app);
+});
+
+// ── GET /api/erp/roles ─────────────────────────────────────────
+// 审批角色列表（前端展示用）
+erpRouter.get("/roles", (req, res) => {
+  res.json({ roles: Object.values(APPROVAL_ROLES) });
+});

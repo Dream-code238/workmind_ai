@@ -1,59 +1,135 @@
+/**
+ * @description 知识库路由：文档管理（上传/列表/删除）+ RAG 问答（流式）
+ */
+
 import express from "express";
 import multer from "multer";
-import { ingestText, parsePDF, getDocStore } from "../services/rag/ingest.js";
-import { searchKnowledge } from "../services/rag/query.js";
-import { chatModel } from "../services/model.js";
-import { ChatPromptTemplate } from "@langchain/core/prompts";
+import path from "path";
+import {
+  ingestDocument,
+  getDocRegistry,
+  deleteDocument,
+} from "../services/rag/ingest.js";
+import { ragQueryStream } from "../services/rag/query.js";
+import { rateLimiter } from "../middleware/index.js";
+import { sendSseError } from "../utils/errors.js";
+import { logger } from "../utils/logger.js";
 
-const router = express.Router();
+export const knowledgeRouter = express.Router();
 
+// ── multer 文件上传配置 ────────────────────────────────────────
+// memoryStorage：文件先存内存，再由业务代码决定怎么处理
+// diskStorage：直接存磁盘（大文件推荐）
 const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
-});
-
-// POST /api/knowledge/upload - 上传文档
-router.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ error: "请上传文件" });
-
-    let text;
-    if (file.mimetype === "application/pdf") {
-      text = await parsePDF(file.buffer, file.originalname);
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => cb(null, "./uploads/"),
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      const name = `${Date.now()}_${Math.random().toString(36).slice(2, 6)}${ext}`;
+      cb(null, name);
+    },
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 最大 10MB
+  },
+  fileFilter: (req, file, cb) => {
+    // 只允许这几种格式
+    const allowed = [".txt", ".md", ".pdf"];
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (allowed.includes(ext)) {
+      cb(null, true);
     } else {
-      text = file.buffer.toString("utf-8");
+      cb(new Error(`不支持的文件格式 ${ext}，只支持 ${allowed.join(", ")}`));
     }
-
-    const result = await ingestText(file.originalname, text);
-    res.json({ success: true, ...result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  },
 });
 
-// POST /api/knowledge/ingest-text - 直接提交文本
-router.post("/ingest-text", async (req, res) => {
+// ── POST /api/knowledge/documents ─────────────────────────────
+// 上传文档并入库
+// 支持两种方式：1) 上传文件  2) 直接传文本内容
+knowledgeRouter.post("/documents", rateLimiter, async (req, res) => {
+  // 先尝试文件上传
+  upload.single("file")(req, res, async (uploadErr) => {
+    try {
+      let docMeta;
+
+      if (req.file) {
+        // 方式1：上传文件
+        docMeta = await ingestDocument({
+          filePath: req.file.path,
+          fileName: req.file.originalname,
+          title:
+            req.body.title || req.file.originalname.replace(/\.[^.]+$/, ""),
+          category: req.body.category || "通用",
+          mimeType: req.file.mimetype,
+        });
+      } else if (req.body.content) {
+        // 方式2：直接传文本（前端粘贴内容）
+        // 先写到临时文件，再走统一入库流程
+        const fs = await import("fs/promises");
+        const tmpPath = `./uploads/tmp_${Date.now()}.txt`;
+        await fs.writeFile(tmpPath, req.body.content, "utf-8");
+
+        docMeta = await ingestDocument({
+          filePath: tmpPath,
+          fileName: (req.body.title || "文本内容") + ".txt",
+          title: req.body.title || "未命名文档",
+          category: req.body.category || "通用",
+          mimeType: "text/plain",
+        });
+      } else {
+        return res
+          .status(400)
+          .json({ error: { message: "请上传文件或提供文本内容" } });
+      }
+
+      res.json({ success: true, document: docMeta });
+    } catch (err) {
+      logger.error("knowledge: ingest error", { error: err.message });
+      res
+        .status(500)
+        .json({ error: { message: err.message || "文档处理失败" } });
+    }
+  });
+});
+
+// ── GET /api/knowledge/documents ──────────────────────────────
+// 获取所有已入库的文档
+knowledgeRouter.get("/documents", (req, res) => {
+  const docs = getDocRegistry();
+  const { category } = req.query;
+
+  const filtered = category
+    ? docs.filter((d) => d.category === category)
+    : docs;
+
+  res.json({ documents: filtered });
+});
+
+// ── DELETE /api/knowledge/documents/:docId ─────────────────────
+// 删除文档（从向量库和注册表中删除）
+knowledgeRouter.delete("/documents/:docId", async (req, res) => {
   try {
-    const { text, fileName } = req.body;
-    if (!text) return res.status(400).json({ error: "请提供文本内容" });
-
-    const result = await ingestText(fileName || "手动输入", text);
-    res.json({ success: true, ...result });
+    await deleteDocument(req.params.docId);
+    res.json({ success: true });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    res.status(404).json({ error: { message: err.message } });
   }
 });
 
-// POST /api/knowledge/ask - 基于知识库提问
-router.post("/ask", async (req, res) => {
-  const { question } = req.body;
-  if (!question) return res.status(400).json({ error: "请输入问题" });
+// ── POST /api/knowledge/query/stream ──────────────────────────
+// RAG 问答（流式）：先推送来源，再流式推送回答
+knowledgeRouter.post("/query/stream", rateLimiter, async (req, res) => {
+  const { question, category } = req.body;
 
-  // 设置 SSE 流
+  if (!question?.trim()) {
+    return res.status(400).json({ error: { message: "问题不能为空" } });
+  }
+
   res.setHeader("Content-Type", "text/event-stream");
   res.setHeader("Cache-Control", "no-cache");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
 
   const send = (event, data) => {
     if (!res.writableEnded) {
@@ -62,80 +138,52 @@ router.post("/ask", async (req, res) => {
   };
 
   try {
-    send("start", {});
+    send("status", { message: "正在检索相关文档..." });
 
-    // 步骤 1：检索相关知识
-    const sources = await searchKnowledge(question, { topK: 3 });
-    send("sources", sources.length);
-
-    // 步骤 2：构建 Prompt（知识 + 问题）
-    const context = sources.length
-      ? sources.map((s) => `【来源：${s.fileName}】\n${s.content}`).join("\n\n")
-      : "没有找到相关知识。";
-
-    const prompt = ChatPromptTemplate.fromMessages([
-      [
-        "system",
-        `你是一个知识库助手。请根据以下知识内容回答用户问题。
-        如果知识中没有相关信息，请如实告知。
-
-        知识内容：
-        {context}`,
-      ],
-      ["human", "{question}"],
-    ]);
-
-    const messages = await prompt.formatMessages({
-      context: context || "无相关知识",
-      question,
+    const { sources, streamAnswer } = await ragQueryStream(question, {
+      category,
     });
 
-    // 步骤 3：流式生成回答
-    const stream = await chatModel.stream(messages);
-    let fullReply = "";
+    // 先推送检索到的来源（让用户看到在参考哪些文档）
+    send("sources", { sources });
 
-    for await (const chunk of stream) {
-      if (chunk.content) {
-        fullReply += chunk.content;
-        send("token", { token: chunk.content });
-      }
+    if (!sources.length) {
+      send("token", {
+        token: "知识库中未找到相关内容，请尝试上传相关文档后再提问。",
+      });
+      send("done", {});
+      return res.end();
     }
 
-    // 步骤 4：追加来源引用
-    if (sources.length) {
-      const refText =
-        "\n\n---\n**参考来源：**\n" +
-        sources.map((s, i) => `${i + 1}. ${s.fileName}`).join("\n");
-      // 不再通过 token 发送，而是通过 metadata 事件
-      send("metadata", {
-        sources: sources.map((s) => ({ fileName: s.fileName, score: s.score })),
-      });
+    send("status", { message: "正在生成回答..." });
+
+    // 流式推送回答
+    for await (const token of streamAnswer()) {
+      send("token", { token });
     }
 
     send("done", {});
+    logger.info("knowledge: query done", {
+      question: question.slice(0, 40),
+      sources: sources.length,
+    });
   } catch (err) {
-    send("error", { message: err.message });
+    logger.error("knowledge: query error", { error: err.message });
+    sendSseError(res, err);
   } finally {
     if (!res.writableEnded) res.end();
   }
 });
 
-// GET /api/knowledge/documents - 文档列表
-router.get("/documents", (req, res) => {
-  const docs = [...getDocStore().values()].map((d) => ({
-    id: d.id,
-    fileName: d.fileName,
-    chunkCount: d.chunkCount,
-    createdAt: d.createdAt,
-  }));
-  res.json({ documents: docs });
+// ── GET /api/knowledge/categories ─────────────────────────────
+// 获取所有分类（前端筛选用）
+knowledgeRouter.get("/categories", (req, res) => {
+  const docs = getDocRegistry();
+  const categories = [...new Set(docs.map((d) => d.category))];
+  res.json({
+    categories: [
+      { value: "", label: "全部文档" },
+      ...categories.map((c) => ({ value: c, label: c })),
+    ],
+  });
 });
-
-// DELETE /api/knowledge/documents/:id - 删除文档
-router.delete("/documents/:id", (req, res) => {
-  const store = getDocStore();
-  store.delete(req.params.id);
-  res.json({ success: true });
-});
-
-export default router;

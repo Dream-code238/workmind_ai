@@ -11,7 +11,7 @@
       </div>
     </div>
 
-    <!-- 中间产物 -->
+    <!-- 中间产物：展示各步骤的分析结果 -->
     <div v-if="intermediates.length" class="intermediates">
       <div
         v-for="item in intermediates"
@@ -23,7 +23,7 @@
       </div>
     </div>
 
-    <!-- 修改意见 -->
+    <!-- 修改意见输入 -->
     <div class="feedback-area">
       <label class="feedback-label">修改意见（可选）</label>
       <textarea
@@ -59,7 +59,105 @@ import { ref, computed } from "vue";
 import { useWorkflowStore } from "@/stores/workflow.js";
 
 const emit = defineEmits(["approve", "abort"]);
+
 const wfStore = useWorkflowStore();
 const feedback = ref("");
+
 const intermediates = computed(() => wfStore.intermediates);
 </script>
+
+<style scoped>
+.review-panel {
+  background: #fffbeb;
+  border: 1.5px solid #fde68a;
+  border-radius: var(--radius-xl);
+  padding: var(--space-lg);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-md);
+}
+
+.review-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-md);
+}
+
+.review-icon {
+  font-size: 24px;
+}
+
+.review-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: #92400e;
+  margin-bottom: 3px;
+}
+
+.review-desc {
+  font-size: 12px;
+  color: #b45309;
+  line-height: 1.5;
+}
+
+/* 中间产物展示 */
+.intermediates {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: var(--space-md);
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid #fde68a;
+  border-radius: var(--radius-lg);
+}
+
+.intermediate-item {
+}
+
+.item-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #92400e;
+  margin-bottom: 5px;
+}
+
+.item-value {
+  font-size: 12px;
+  color: #374151;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  background: #fff;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid #fde68a;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+/* 反馈输入 */
+.feedback-label {
+  display: block;
+  font-size: 12px;
+  font-weight: 600;
+  color: #92400e;
+  margin-bottom: 6px;
+}
+
+.input {
+  background: #fff;
+  border-color: #fde68a;
+}
+
+.input:focus {
+  border-color: var(--color-warning);
+}
+
+/* 操作按钮 */
+.review-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+}
+</style>

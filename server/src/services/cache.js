@@ -1,3 +1,4 @@
+// 精确缓存：相同的 system + message 直接返回缓存，不调 API
 import crypto from "crypto";
 import { config } from "../config/index.js";
 
@@ -7,7 +8,7 @@ class ExactCache {
     this.stats = { hits: 0, misses: 0, savedTokens: 0 };
   }
 
-  // 用 MD5 把 system + message 组合成 key
+  // 用 MD5 把 system+message 变成 key
   _key(systemPrompt, message) {
     return crypto
       .createHash("md5")
@@ -40,28 +41,34 @@ class ExactCache {
     const k = this._key(systemPrompt, message);
     this.store.set(k, { content, tokens, ts: Date.now() });
 
-    // 超过 500 条时清除最老的 50 条（简单 LRU）
+    // 缓存超过 500 条时，清除最老的一批（简单 LRU）
     if (this.store.size > 500) {
-      const oldest = [...this.store.entries()]
+      const oldestKeys = [...this.store.entries()]
         .sort((a, b) => a[1].ts - b[1].ts)
         .slice(0, 50)
         .map(([k]) => k);
-      oldest.forEach((k) => this.store.delete(k));
+      oldestKeys.forEach((k) => this.store.delete(k));
     }
   }
 
-  getStats() {
+  // 命中率
+  get hitRate() {
     const total = this.stats.hits + this.stats.misses;
+    return total === 0
+      ? "0%"
+      : `${((this.stats.hits / total) * 100).toFixed(1)}%`;
+  }
 
+  getStats() {
     return {
       size: this.store.size,
       hits: this.stats.hits,
       misses: this.stats.misses,
-      hitRate:
-        total === 0 ? "0%" : `${((this.stats.hits / total) * 100).toFixed(1)}%`,
+      hitRate: this.hitRate,
       savedTokens: this.stats.savedTokens,
     };
   }
 }
 
+// 全局单例
 export const cache = new ExactCache();

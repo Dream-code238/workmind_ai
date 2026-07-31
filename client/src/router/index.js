@@ -24,13 +24,13 @@ const routes = [
     path: "/workflow",
     name: "Workflow",
     component: () => import("@/views/WorkflowView.vue"),
-    meta: { title: "内容工作流", icon: "🔄" },
+    meta: { title: "内容工作流", icon: "⚙️" },
   },
   {
     path: "/erp",
-    name: "Erp",
+    name: "ERP",
     component: () => import("@/views/ErpView.vue"),
-    meta: { title: "ERP 报销请假", icon: "📝" },
+    meta: { title: "报销请假", icon: "📋" },
   },
   {
     path: "/prompt",

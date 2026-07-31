@@ -1,7 +1,14 @@
 // 知识库模块状态：文档列表、上传、问答
 import { defineStore } from "pinia";
 import { ref } from "vue";
-import http, { fetchStream } from "@/utils/http.js";
+import {
+  fetchDocuments,
+  fetchCategories,
+  uploadFile as apiUploadFile,
+  uploadText as apiUploadText,
+  deleteDocument,
+  queryStream,
+} from "@/apis/knowledge.js";
 import { useAppStore } from "./app.js";
 
 export const useKnowledgeStore = defineStore("knowledge", () => {
@@ -14,53 +21,25 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
   const uploadProgress = ref(0); // 0-100
 
   async function loadDocuments(category = "") {
-    const params = category ? `?category=${category}` : "";
-    const data = await http.get(`/knowledge/documents${params}`);
+    const data = await fetchDocuments(category);
     documents.value = data.documents;
   }
 
   async function loadCategories() {
-    const data = await http.get("/knowledge/categories");
+    const data = await fetchCategories();
     categories.value = data.categories;
   }
 
-  // 上传文件（用原生 XMLHttpRequest 监听上传进度）
+  // 上传文件
   async function uploadFile(file, { title, category }) {
     uploading.value = true;
     uploadProgress.value = 0;
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("title", title || file.name.replace(/\.[^.]+$/, ""));
-    formData.append("category", category || "通用");
-
     try {
-      const result = await new Promise((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        xhr.open("POST", "/api/knowledge/documents");
-
-        xhr.upload.addEventListener("progress", (e) => {
-          if (e.lengthComputable) {
-            uploadProgress.value = Math.round((e.loaded / e.total) * 80);
-          }
-        });
-
-        xhr.addEventListener("load", () => {
-          if (xhr.status >= 200 && xhr.status < 300) {
-            uploadProgress.value = 100;
-            resolve(JSON.parse(xhr.responseText));
-          } else {
-            reject(
-              new Error(
-                JSON.parse(xhr.responseText)?.error?.message || "上传失败",
-              ),
-            );
-          }
-        });
-
-        xhr.addEventListener("error", () => reject(new Error("网络错误")));
-        xhr.send(formData);
+      const result = await apiUploadFile(file, { title, category }, (pct) => {
+        uploadProgress.value = pct;
       });
+      uploadProgress.value = 100;
 
       await loadDocuments();
       await loadCategories();
@@ -81,11 +60,7 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
   async function uploadText({ title, category, content }) {
     uploading.value = true;
     try {
-      const data = await http.post("/knowledge/documents", {
-        title,
-        category,
-        content,
-      });
+      const data = await apiUploadText({ title, category, content });
       await loadDocuments();
       await loadCategories();
       appStore.toast.success(`「${data.document.title}」已成功入库`);
@@ -100,7 +75,7 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
 
   async function deleteDocument(docId) {
     const doc = documents.value.find((d) => d.id === docId);
-    await http.delete(`/knowledge/documents/${docId}`);
+    await deleteDocument(docId);
     documents.value = documents.value.filter((d) => d.id !== docId);
     appStore.toast.success(`「${doc?.title}」已删除`);
   }
@@ -133,34 +108,30 @@ export const useKnowledgeStore = defineStore("knowledge", () => {
     };
     messages.value.push(aiMsg);
 
-    await fetchStream(
-      "/api/knowledge/query/stream",
-      { question, category: filterCategory.value || undefined },
-      {
-        onToken: (token) => {
-          aiMsg.content += token;
-          aiMsg.status = "";
-        },
-        onEvent: (event, data) => {
-          if (event === "sources") {
-            aiMsg.sources = data.sources;
-          }
-          if (event === "status") {
-            aiMsg.status = data.message;
-          }
-        },
-        onDone: () => {
-          aiMsg.streaming = false;
-          aiMsg.status = "";
-        },
-        onError: (err) => {
-          aiMsg.streaming = false;
-          aiMsg.status = "";
-          aiMsg.content = aiMsg.content || "查询失败，请重试。";
-          appStore.toast.error(err.message);
-        },
+    await queryStream(question, filterCategory.value || undefined, {
+      onToken: (token) => {
+        aiMsg.content += token;
+        aiMsg.status = "";
       },
-    );
+      onEvent: (event, data) => {
+        if (event === "sources") {
+          aiMsg.sources = data.sources;
+        }
+        if (event === "status") {
+          aiMsg.status = data.message;
+        }
+      },
+      onDone: () => {
+        aiMsg.streaming = false;
+        aiMsg.status = "";
+      },
+      onError: (err) => {
+        aiMsg.streaming = false;
+        aiMsg.status = "";
+        aiMsg.content = aiMsg.content || "查询失败，请重试。";
+        appStore.toast.error(err.message);
+      },
+    });
 
     querying.value = false;
   }

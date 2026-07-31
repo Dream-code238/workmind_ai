@@ -1,38 +1,48 @@
 // ERP 模块状态：表单解析、审批流、申请记录
 import { defineStore } from "pinia";
-import { ref } from "vue";
-import { fetchStream } from "@/utils/http.js";
-import http from "@/utils/http.js";
+import { ref, reactive } from "vue";
+import {
+  parseForm as apiParseForm,
+  submitApprovalStream,
+  fetchApplications,
+} from "@/apis/erp.js";
 import { useAppStore } from "./app.js";
 
 export const useErpStore = defineStore("erp", () => {
   const appStore = useAppStore();
 
   // ── 当前表单 ──────────────────────────────────────────────
-  const formType = ref("expense"); // 'expense' | 'leave'
-  const parsedForm = ref(null); // AI 解析出的结构化表单数据
+  // 'expense' | 'leave'
+  const formType = ref("expense");
+  // 解析出的结构化表单数据
+  const parsedForm = ref(null);
+  // 解析中
   const parsing = ref(false);
 
   // ── 审批流状态 ────────────────────────────────────────────
-  const approvalMessages = ref([]); // 审批对话气泡列表
-  const approvalSteps = ref([]); // [{ roleId, role, status }]
+  // 审批过程中产生的所有消息（对话气泡列表）
+  const approvalMessages = ref([]);
+  // 当前审批流程步骤 [{ roleId, role, status: 'pending'|'running'|'approved'|'rejected' }]
+  const approvalSteps = ref([]);
+  // 审批是否进行中
   const approving = ref(false);
-  const finalResult = ref(null); // { approved, status }
+  // 最终审批结果
+  const finalResult = ref(null);
+  // 当前申请编号
   const currentAppId = ref("");
 
   // ── 申请列表 ──────────────────────────────────────────────
   const applications = ref([]);
 
-  // ── 解析表单（调用后端 AI 解析接口）───────────────────────
+  // ── 解析表单 ──────────────────────────────────────────────
   async function parseForm(text) {
     if (!text.trim() || parsing.value) return;
+
     parsing.value = true;
     parsedForm.value = null;
+
     try {
-      const data = await http.post("/erp/parse", {
-        text,
-        formType: formType.value,
-      });
+      const data = await apiParseForm(text, formType.value);
       parsedForm.value = data.form;
       return data.form;
     } catch (err) {
@@ -42,28 +52,26 @@ export const useErpStore = defineStore("erp", () => {
     }
   }
 
-  // ── 提交审批（SSE 流式接收审批过程）─────────────────────
+  // ── 提交审批 ──────────────────────────────────────────────
   async function submitApproval(applicantName = "申请人") {
     if (!parsedForm.value || approving.value) return;
+
     approving.value = true;
     approvalMessages.value = [];
     approvalSteps.value = [];
     finalResult.value = null;
 
-    await fetchStream(
-      "/api/erp/submit/stream",
-      {
-        formData: parsedForm.value,
-        formType: formType.value,
-        applicantName,
-      },
+    await submitApprovalStream(
+      parsedForm.value,
+      formType.value,
+      applicantName,
       {
         onEvent: (event, data) => {
           if (event === "start") {
             currentAppId.value = data.appId;
           }
 
-          // 公布审批流程
+          // 公布审批流程（需要哪些审批人）
           if (event === "plan") {
             approvalSteps.value = data.approvers.map((role) => ({
               roleId: role.id,
@@ -104,6 +112,7 @@ export const useErpStore = defineStore("erp", () => {
           if (event === "final") {
             finalResult.value = data;
             approving.value = false;
+            // 刷新申请列表
             loadApplications();
           }
 
@@ -122,11 +131,12 @@ export const useErpStore = defineStore("erp", () => {
   // ── 申请记录 ──────────────────────────────────────────────
   async function loadApplications() {
     try {
-      const data = await http.get("/erp/applications");
+      const data = await fetchApplications();
       applications.value = data.applications;
     } catch {}
   }
 
+  // 重置（开始新申请）
   function reset() {
     parsedForm.value = null;
     approvalMessages.value = [];
